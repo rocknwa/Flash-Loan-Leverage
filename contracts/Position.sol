@@ -2,8 +2,13 @@
 pragma solidity 0.8.28;
 
 // Balancer
-import {IVault, IERC20} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
+import {IVault} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
+import {IERC20 as IERC20Balancer} from "@balancer-labs/v2-interfaces/contracts/vault/IVault.sol";
 import {IFlashLoanRecipient} from "@balancer-labs/v2-interfaces/contracts/vault/IFlashLoanRecipient.sol";
+
+// OpenZeppelin SafeERC20 and IERC20
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 // Uniswap V3 Router
 import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
@@ -17,6 +22,8 @@ interface IWETH {
 }
 
 contract Position is IFlashLoanRecipient {
+    using SafeERC20 for IERC20;
+
     // ERC20 Contracts
     address constant WETH_ADDRESS = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
     address constant USDC_ADDRESS = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
@@ -75,8 +82,8 @@ contract Position is IFlashLoanRecipient {
         bytes memory data = abi.encode(isOpenPosition, encodedParams);
 
         // Token to flash loan, by default we are flash loaning 1 token.
-        IERC20[] memory tokens = new IERC20[](1);
-        tokens[0] = IERC20(params.assetToBorrow);
+        IERC20Balancer[] memory tokens = new IERC20Balancer[](1);
+        tokens[0] = IERC20Balancer(params.assetToBorrow);
 
         // Flash loan amount.
         uint256[] memory amounts = new uint256[](1);
@@ -99,8 +106,8 @@ contract Position is IFlashLoanRecipient {
         bytes memory data = abi.encode(isOpenPosition, encodedParams);
 
         // Token to flash loan, by default we are flash loaning 1 token.
-        IERC20[] memory tokens = new IERC20[](1);
-        tokens[0] = IERC20(params.assetToRepay);
+        IERC20Balancer[] memory tokens = new IERC20Balancer[](1);
+        tokens[0] = IERC20Balancer(params.assetToRepay);
 
         // We need to know what the debt amount is as we'll
         // use that as the flash amount.
@@ -120,11 +127,11 @@ contract Position is IFlashLoanRecipient {
         @param userData ABI encoded data from openPosition() or closePosition().
      */
     function receiveFlashLoan(
-        IERC20[] memory,
+        IERC20Balancer[] memory,
         uint256[] memory amounts,
         uint256[] memory,
         bytes memory userData
-    ) external {
+    ) external override {
         require(msg.sender == VAULT, "Position: Caller not Balancer Vault");
 
         (bool isOpenPosition, bytes memory encodedParams) = abi.decode(
@@ -136,11 +143,9 @@ contract Position is IFlashLoanRecipient {
             OpenParams memory params = abi.decode(encodedParams, (OpenParams));
             open(params);
 
-            // Repay flash loan
-            IERC20(params.assetToBorrow).transfer(
-                VAULT,
-                params.assetToBorrowAmount
-            );
+            // Repay flash loan using SafeERC20
+            IERC20 token = IERC20(params.assetToBorrow);
+            token.safeTransfer(VAULT, params.assetToBorrowAmount);
         } else {
             CloseParams memory params = abi.decode(
                 encodedParams,
@@ -148,8 +153,9 @@ contract Position is IFlashLoanRecipient {
             );
             close(params, amounts[0]);
 
-            // Repay flash loan
-            IERC20(params.assetToRepay).transfer(VAULT, amounts[0]);
+            // Repay flash loan using SafeERC20
+            IERC20 token = IERC20(params.assetToRepay);
+            token.safeTransfer(VAULT, amounts[0]);
         }
     }
 
@@ -219,8 +225,9 @@ contract Position is IFlashLoanRecipient {
         uint256 amountIn,
         uint256 amountOutMin
     ) internal returns (uint256 amountOut) {
-        // Approve token to swap
-        IERC20(tokenIn).approve(ROUTER, amountIn);
+        // Approve token to swap using SafeERC20
+        IERC20 token = IERC20(tokenIn);
+        token.forceApprove(ROUTER, amountIn);
 
         // Setup swap parameters
         ISwapRouter.ExactInputSingleParams memory params = ISwapRouter
@@ -245,7 +252,8 @@ contract Position is IFlashLoanRecipient {
         @param amount amount of token to supply.
      */
     function supply(address assetToSupply, uint256 amount) internal {
-        IERC20(assetToSupply).approve(AAVE_POOL_ADDRESS, amount);
+        IERC20 token = IERC20(assetToSupply);
+        token.forceApprove(AAVE_POOL_ADDRESS, amount);
         IPool(AAVE_POOL_ADDRESS).supply(
             assetToSupply,
             amount,
@@ -274,7 +282,8 @@ contract Position is IFlashLoanRecipient {
         @param assetToRepay Address of token to repay.
      */
     function repay(address assetToRepay) internal {
-        IERC20(assetToRepay).approve(AAVE_POOL_ADDRESS, type(uint256).max);
+        IERC20 token = IERC20(assetToRepay);
+        token.forceApprove(AAVE_POOL_ADDRESS, type(uint256).max);
         IPool(AAVE_POOL_ADDRESS).repay(
             assetToRepay,
             type(uint256).max,
@@ -310,8 +319,9 @@ contract Position is IFlashLoanRecipient {
         address assetToSupply,
         uint256 amount
     ) external onlyOwner {
-        IERC20(assetToSupply).transferFrom(msg.sender, address(this), amount);
-        IERC20(assetToSupply).approve(AAVE_POOL_ADDRESS, amount);
+        IERC20 token = IERC20(assetToSupply);
+        token.safeTransferFrom(msg.sender, address(this), amount);
+        token.forceApprove(AAVE_POOL_ADDRESS, amount);
         IPool(AAVE_POOL_ADDRESS).supply(
             assetToSupply,
             amount,
@@ -348,7 +358,7 @@ contract Position is IFlashLoanRecipient {
         @param amount Amount of token to withdraw.
      */
     function withdrawTokens(address token, uint256 amount) external onlyOwner {
-        IERC20(token).transfer(owner, amount);
+        IERC20(token).safeTransfer(owner, amount);
     }
 
     /**
